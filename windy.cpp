@@ -1,7 +1,9 @@
-#include <GDIPlus.h>
-#include <ShellScalingAPI.h>
-#include <WindowsX.h>
+// clang-format off
 #include <stddef.h>
+#include <WindowsX.h>
+#include <ShellScalingAPI.h>
+#include <GDIPlus.h>
+// clang-format on
 
 // Restricts the overlay to half the monitor, so as not to obscure the debugger.
 #define HALF_MONITOR 0
