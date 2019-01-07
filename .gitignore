@@ -1,6 +1,7 @@
 .vs/
 .vscode/
 Debug/
+x64/
 *.exe
 *.ilk
 *.pdb

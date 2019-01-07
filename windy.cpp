@@ -444,11 +444,11 @@ LRESULT CALLBACK OverlayWindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
     case WM_LBUTTONDOWN:
     case WM_LBUTTONUP:
     case WM_MOUSEMOVE:
-        OnOverlayMouse(message, wParam, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        OnOverlayMouse(message, (UINT)wParam, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         break;
 
     case WM_KEYDOWN:
-        OnOverlayKey(wParam);
+        OnOverlayKey((UINT)wParam);
         break;
 
     case WM_ERASEBKGND:
