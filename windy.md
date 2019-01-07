@@ -48,9 +48,17 @@ I CCCC I CCCC I
 
 What happens when a row or column is deleted that has windows in it? Are they reflowed to other cells automatically? Is the deletion forbidden? Are they closed?
 
-In a shelf, hotkey to jam it to fill the entire vertical (and /or horizontal?) space temporarily.
+In a shelf, hotkey to jam it to fill the entire vertical (and /or horizontal?) space temporarily. Like Z in tmux.
 
-Use a mouse third button instead of a Windiows key.
+Use a mouse third button instead of a Windows key. Actually use any and all extra mouse buttons, why not.
+
+### 1/6/2018 Shelf Notes
+In revisiting the program I find that R and C defining a grid is quite awkward. I hit C to split into two columns, which was fine, and then I hit R, intending to split only the right column, but instead it split both. 
+It strikes me that a grid encourages a maximum amount of reflowing, since any edit casts a swath of change across the desktop.
+On the one hand I felt that I would like to have had a recursive split happen. The first division by C into columns, followed by a division of just the right half into rows. 
+This isn't strictly the same as SN-style K-d tree, since it's conceivable that the C simply splits the current cell into a new "column" shelf, with N slots, that can be increased or decreased (using some other hotkey or mouse placement...).
+Ultimately the functionality of a shelf-as-a-grid still feels fine, it's simply a matter of what the keypresses do - spawn a new child shelf, or change the dimensions of the current one.
+I'll try spawning a child shelf with a different key and see how that goes. The visual representation *should* be good enough that it's clear what's going on. Need to play around in Inkscape.
 
 ## Swirl
 

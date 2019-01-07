@@ -3,6 +3,7 @@
 #include <ShellScalingAPI.h>
 #include <GDIPlus.h>
 
+// Restricts the overlay to half the monitor, so as not to obscure the debugger.
 #define HALF_MONITOR 0
 
 #define HOTKEY_ID   1
@@ -23,26 +24,35 @@
 struct  
 {
     HINSTANCE hInst;
-} Win;
+} win;
 
-struct Rect
+struct Point
 {
-    int X, Y, Width, Height;
+	int x;
+	int y;
+};
+
+struct Bounds
+{
+	int x;
+	int y;
+	int width;
+	int height;
 };
 
 struct {
     HWND hWnd;
-    struct Rect PlaceRect;
-} OnDeck;
+    struct Bounds placement;
+} onDeck;
 
 struct {
-	struct Monitor *Monitor;
+	struct Monitor *monitor;
     HWND hWnd;
-    struct Rect Rect;
-    bool IsOpen;
-} Overlay;
+    struct Bounds bounds;
+    bool isOpen;
+} overlay;
 
-void FatalWin32Error(const char *Format, ...)
+void FatalWin32Error(const char *format, ...)
 {
 }
 
@@ -53,77 +63,89 @@ void FatalWin32Error(const char *Format, ...)
         } \
     } while (0)
 
-void ReportError(const char *Format, ...)
+void ReportError(const char *format, ...)
 {
 }
 
-void FatalError(const char *Format, ...)
+void FatalError(const char *format, ...)
 {
 }
 
-void *Alloc(size_t Size, size_t Count, const char *Name)
+void *Allocate(size_t size, size_t count, const char *name)
 {
-    void *Mem = calloc(Count, Size);
-    if (Mem == NULL)
-        FatalError("Allocation of %d %s%s failed", Count, Name, Count>1?"s":"");
-    return Mem;
+    void *mem = calloc(count, size);
+    if (mem == NULL)
+        FatalError("Allocation of %d %s%s failed", count, name, count>1?"s":"");
+    return mem;
 }
 
-#define AllocStruct(type_) (type_ *)Alloc(sizeof(type_), 1, #type_)
+#define AllocateStruct(type_) (type_ *)Allocate(sizeof(type_), 1, #type_)
 
 struct
 {
     PAINTSTRUCT ps;
     HDC hdc;
     Gdiplus::Graphics *g;
-} Draw;
+} draw;
 
-void DrawText(int X, int Y, int Size, const char *Text)
+void DrawText(int x, int y, int size, const char *text)
 {
-    Gdiplus::SolidBrush Brush(Gdiplus::Color(255, 0, 0, 0));
-    Gdiplus::FontFamily FontFamily(L"Times New Roman");
-    Gdiplus::Font Font(&FontFamily, (float)Size, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-    Gdiplus::PointF PointF((float)X - Overlay.Rect.X, (float)Y - Overlay.Rect.Y);
+    Gdiplus::SolidBrush brush(Gdiplus::Color(255, 0, 0, 0));
+    Gdiplus::FontFamily fontFamily(L"Times New Roman");
+    Gdiplus::Font font(&fontFamily, (float)size, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    Gdiplus::PointF pointF((float)x - overlay.bounds.x, (float)y - overlay.bounds.y);
 
-    size_t Chars;
-    WCHAR WideText[_MAX_PATH];
-    mbstowcs_s(&Chars, WideText, _MAX_PATH, Text, strlen(Text));
+    size_t chars;
+    WCHAR wideText[_MAX_PATH];
+    mbstowcs_s(&chars, wideText, _MAX_PATH, text, strlen(text));
 
-    Draw.g->DrawString(WideText, -1, &Font, PointF, &Brush);
+    draw.g->DrawString(wideText, -1, &font, pointF, &brush);
 }
 
-void DrawRect(struct Rect Rect, int LineWidth, bool Dashed)
+void DrawRectangle(struct Bounds bounds, int lineWidth, bool dashed)
 {
-    Gdiplus::Pen Pen(Gdiplus::Color(255, 0, 0, 0), 10);
-    Pen.SetAlignment(Gdiplus::PenAlignmentInset);
+    Gdiplus::Pen pen(Gdiplus::Color(255, 0, 0, 0), 10);
+    pen.SetAlignment(Gdiplus::PenAlignmentInset);
 
-    if (Dashed)
-        Pen.SetDashStyle(Gdiplus::DashStyleDash);
+    if (dashed)
+        pen.SetDashStyle(Gdiplus::DashStyleDash);
 
-    Draw.g->DrawRectangle(&Pen, Rect.X - Overlay.Rect.X, Rect.Y - Overlay.Rect.Y, Rect.Width, Rect.Height);
+    draw.g->DrawRectangle(&pen, bounds.x - overlay.bounds.x, bounds.y - overlay.bounds.y, bounds.width, bounds.height);
+}
+
+bool PointInBounds(struct Point point, struct Bounds bounds)
+{
+	if (point.x < bounds.x)
+		return false;
+	if (point.x >= bounds.x + bounds.width)
+		return false;
+	if (point.y < bounds.y)
+		return false;
+	if (point.y >= bounds.y + bounds.height)
+		return false;
+	return true;
 }
 
 struct Input
 {
-    int X;
-    int Y;
-    int Buttons;
-    int Key;
-	bool Shift;
+	struct Point position;
+    int buttons;
+    int key;
+	bool shift;
 };
 
-struct Input Old;
-struct Input New;
+struct Input oldInput;
+struct Input newInput;
 
-typedef void (*BinOnDrawFn)(struct Bin *Bin);
-typedef void (*BinOnInputFn)(struct Bin *Bin);
+typedef void (*BinOnDrawFn)(struct Bin *bin);
+typedef void (*BinOnInputFn)(struct Bin *bin);
 
 struct Bin
 {
-    BinOnDrawFn OnDrawFn;
-    BinOnInputFn OnInputFn;
+    BinOnDrawFn onDrawFn;
+    BinOnInputFn onInputFn;
 
-    struct Rect Rect;
+    struct Bounds bounds;
 
     struct Bin **Subs;
 };
@@ -138,74 +160,76 @@ void RemoveSubBin(struct Bin *Bin, struct Bin *Sub)
 
 struct Shelf
 {
-    struct Bin Bin;
+    struct Bin bin;
     
-    int Rows;
-    int Cols;
+    int rows;
+    int cols;
 
-    int HoverRow;
-    int HoverCol;
+    int hoverRow;
+    int hoverCol;
 };
 
 #define OffsetOf(type_, member_) (size_t)( (ptrdiff_t)&reinterpret_cast<const volatile char&>((((type_ *)0)->member_)) )
 #define Unwrap(type_, member_, ptr_) (type_ *)((char *)ptr_ - OffsetOf(type_, member_))
+#define Wrap(ptr_, member_) (&((ptr_)->member_))
 
-void ShelfDraw(struct Bin *Bin)
+struct Bounds ShelfMakeCellBounds(struct Shelf *shelf, int row, int col)
 {
-    struct Shelf *Shelf = Unwrap(struct Shelf, Bin, Bin);
+	struct Bounds bounds;
+	bounds.width = (shelf->bin.bounds.width - (shelf->cols + 1) * BORDER_INSET) / shelf->cols;
+	bounds.height = (shelf->bin.bounds.height - (shelf->rows + 1) * BORDER_INSET) / shelf->rows;
+	bounds.x = shelf->bin.bounds.x + col * (bounds.width + BORDER_INSET) + BORDER_INSET;
+	bounds.y = shelf->bin.bounds.y + row * (bounds.height + BORDER_INSET) + BORDER_INSET;
+	return bounds;
+}
 
-    for (int Row = 0; Row < Shelf->Rows; Row++)
+void ShelfDraw(struct Bin *bin)
+{
+    struct Shelf *shelf = Unwrap(struct Shelf, bin, bin);
+
+    for (int row = 0; row < shelf->rows; row++)
     {
-        for (int Col = 0; Col < Shelf->Cols; Col++)
+        for (int col = 0; col < shelf->cols; col++)
         {
-            struct Rect CellRect;
-            CellRect.Width = (Shelf->Bin.Rect.Width - (Shelf->Cols + 1) * BORDER_INSET) / Shelf->Cols;
-            CellRect.Height = (Shelf->Bin.Rect.Height - (Shelf->Rows + 1) * BORDER_INSET) / Shelf->Rows;
-            CellRect.X = Shelf->Bin.Rect.X + Col * (CellRect.Width + BORDER_INSET) + BORDER_INSET;
-            CellRect.Y = Shelf->Bin.Rect.Y + Row * (CellRect.Height + BORDER_INSET) + BORDER_INSET;
+			struct Bounds bounds = ShelfMakeCellBounds(shelf, row, col);
 
-            bool Dashed = false;
-            if (Col == Shelf->HoverCol && Row == Shelf->HoverRow)
-                Dashed = true;
+            bool dashed = false;
+            if (col == shelf->hoverCol && row == shelf->hoverRow)
+                dashed = true;
 
-            DrawRect(CellRect, BORDER_WIDTH, Dashed);
+            DrawRectangle(bounds, BORDER_WIDTH, dashed);
         }
     }
 }
 
-void ShelfInput(struct Bin *Bin)
+void ShelfInput(struct Bin *bin)
 {
-    struct Shelf *Shelf = Unwrap(struct Shelf, Bin, Bin);
+    struct Shelf *shelf = Unwrap(struct Shelf, bin, bin);
 
-    if (New.Key == 'C' && !New.Shift)
-        Shelf->Cols++;
-    if (New.Key == 'C' && New.Shift && Shelf->Cols > 1)
-        Shelf->Cols--;
+    if (newInput.key == 'C' && !newInput.shift)
+		shelf->cols++;
+    if (newInput.key == 'C' && newInput.shift && shelf->cols > 1)
+		shelf->cols--;
     
-	if (New.Key == 'R' && !New.Shift)
-		Shelf->Rows++;
-	if (New.Key == 'R' && New.Shift && Shelf->Rows > 1)
-		Shelf->Rows--;
+	if (newInput.key == 'R' && !newInput.shift)
+		shelf->rows++;
+	if (newInput.key == 'R' && newInput.shift && shelf->rows > 1)
+		shelf->rows--;
 
-    Shelf->HoverRow = -1;
-    Shelf->HoverCol = -1;
-    for (int Row = 0; Row < Shelf->Rows; Row++)
+	shelf->hoverRow = -1;
+	shelf->hoverCol = -1;
+    for (int row = 0; row < shelf->rows; row++)
     {
-        for (int Col = 0; Col < Shelf->Cols; Col++)
+        for (int col = 0; col < shelf->cols; col++)
         {
-            struct Rect CellRect;
-            CellRect.Width = (Shelf->Bin.Rect.Width - (Shelf->Cols + 1) * BORDER_INSET) / Shelf->Cols;
-            CellRect.Height = (Shelf->Bin.Rect.Height - (Shelf->Rows + 1) * BORDER_INSET) / Shelf->Rows;
-            CellRect.X = Shelf->Bin.Rect.X + Col * (CellRect.Width + BORDER_INSET) + BORDER_INSET;
-            CellRect.Y = Shelf->Bin.Rect.Y + Row * (CellRect.Height + BORDER_INSET) + BORDER_INSET;
+			struct Bounds bounds = ShelfMakeCellBounds(shelf, row, col);
 
-            if (New.X >= CellRect.X && New.Y < CellRect.X + CellRect.Width && 
-                New.Y >= CellRect.Y && New.Y < CellRect.Y + CellRect.Height)
+            if (PointInBounds(newInput.position, bounds))
             {
-                Shelf->HoverRow = Row;
-                Shelf->HoverCol = Col;
+				shelf->hoverRow = row;
+				shelf->hoverCol = col;
 
-                OnDeck.PlaceRect = CellRect;
+                onDeck.placement = bounds;
             }
         }
     }
@@ -213,12 +237,12 @@ void ShelfInput(struct Bin *Bin)
 
 struct Shelf *NewShelf()
 {
-    struct Shelf *Shelf = AllocStruct(struct Shelf);
-    Shelf->Bin.OnDrawFn = ShelfDraw;
-    Shelf->Bin.OnInputFn = ShelfInput;
-    Shelf->Rows = 1;
-    Shelf->Cols = 1;
-    return Shelf;
+    struct Shelf *shelf = AllocateStruct(struct Shelf);
+	shelf->bin.onDrawFn = ShelfDraw;
+	shelf->bin.onInputFn = ShelfInput;
+	shelf->rows = 1;
+	shelf->cols = 1;
+    return shelf;
 }
 
 #define MONITOR_LIMIT 16
@@ -226,50 +250,50 @@ struct Shelf *NewShelf()
 struct Monitor
 {
 	HMONITOR hMonitor;
-	MONITORINFO Info;
-	struct Rect Rect;
-	struct Bin *Root;
+	MONITORINFO info;
+	struct Bounds bounds;
+	struct Bin *root;
 };
 
-struct Monitor Monitors[MAX_MONITORS];
+struct Monitor monitors[MAX_MONITORS];
 
-void UpdateMonitorInfo(struct Monitor *Monitor)
+void UpdateMonitorInfo(struct Monitor *monitor)
 {
-	Monitor->Info = { sizeof(MONITORINFO) };
-	CheckWin32(GetMonitorInfo(Monitor->hMonitor, &Monitor->Info));
+	monitor->info = { sizeof(MONITORINFO) };
+	CheckWin32(GetMonitorInfo(monitor->hMonitor, &monitor->info));
 
-	Monitor->Rect.X = Monitor->Info.rcWork.left;
-	Monitor->Rect.Y = Monitor->Info.rcWork.top;
-	Monitor->Rect.Width = Monitor->Info.rcWork.right - Monitor->Info.rcWork.left;
-	Monitor->Rect.Height = Monitor->Info.rcWork.bottom - Monitor->Info.rcWork.top;
+	monitor->bounds.x = monitor->info.rcWork.left;
+	monitor->bounds.y = monitor->info.rcWork.top;
+	monitor->bounds.width = monitor->info.rcWork.right - monitor->info.rcWork.left;
+	monitor->bounds.height = monitor->info.rcWork.bottom - monitor->info.rcWork.top;
 }
 
 struct Monitor *GetMonitorAtCursor()
 {
-	POINT MousePt = {};
-	CheckWin32(GetCursorPos(&MousePt));
+	POINT mousePoint = {};
+	CheckWin32(GetCursorPos(&mousePoint));
 
-	HMONITOR hMonitor = MonitorFromPoint(MousePt, MONITOR_DEFAULTTONULL);
+	HMONITOR hMonitor = MonitorFromPoint(mousePoint, MONITOR_DEFAULTTONULL);
 	if (hMonitor == NULL)
 	{
-		ReportError("Mouse position %d %d was not over any monitor", MousePt.x, MousePt.y);
+		ReportError("Mouse position %d %d was not over any monitor", mousePoint.x, mousePoint.y);
 		return NULL;
 	}
 
 	for (int i = 0; i < MONITOR_LIMIT; i++)
 	{
-		struct Monitor *Monitor = &Monitors[i];
-		if (Monitor->hMonitor == NULL)
+		struct Monitor *monitor = &monitors[i];
+		if (monitor->hMonitor == NULL)
 		{
-			Monitor->hMonitor = hMonitor;
-			Monitor->Root = &NewShelf()->Bin;
-			UpdateMonitorInfo(Monitor);
-			return Monitor;
+			monitor->hMonitor = hMonitor;
+			monitor->root = Wrap(NewShelf(), bin);
+			UpdateMonitorInfo(monitor);
+			return monitor;
 		}
-		if (Monitor->hMonitor == hMonitor)
+		if (monitor->hMonitor == hMonitor)
 		{
-			UpdateMonitorInfo(Monitor);
-			return Monitor;
+			UpdateMonitorInfo(monitor);
+			return monitor;
 		}
 	}
 
@@ -278,61 +302,61 @@ struct Monitor *GetMonitorAtCursor()
 
 void PickOnDeckWindow()
 {
-    POINT MousePt = {};
-    CheckWin32(GetCursorPos(&MousePt));
+    POINT mousePoint = {};
+    CheckWin32(GetCursorPos(&mousePoint));
 
-    OnDeck.PlaceRect = { 100, 100, 800, 600 };
+    onDeck.placement = { 100, 100, 800, 600 };
 
-	HWND hWnd = WindowFromPoint(MousePt);
-	OnDeck.hWnd = GetAncestor(hWnd, GA_ROOT);
+	HWND hWnd = WindowFromPoint(mousePoint);
+	onDeck.hWnd = GetAncestor(hWnd, GA_ROOT);
 }
 
 void ClearOnDeckWindow()
 {
-    OnDeck.hWnd = NULL;
+    onDeck.hWnd = NULL;
 }
 
 void PlaceOnDeckWindow()
 {
-    if (!OnDeck.hWnd)
+    if (!onDeck.hWnd)
     {
         ReportError("Tried to place the on deck window when none was active");
         return;
     }
 
-    SetWindowPos(OnDeck.hWnd, NULL, OnDeck.PlaceRect.X, OnDeck.PlaceRect.Y, OnDeck.PlaceRect.Width, OnDeck.PlaceRect.Height, SWP_SHOWWINDOW);
+    SetWindowPos(onDeck.hWnd, NULL, onDeck.placement.x, onDeck.placement.y, onDeck.placement.width, onDeck.placement.height, SWP_SHOWWINDOW);
 }
 
 void ShowOverlay()
 {
-	Overlay.Monitor = GetMonitorAtCursor();
-	if (Overlay.Monitor == NULL)
+	overlay.monitor = GetMonitorAtCursor();
+	if (overlay.monitor == NULL)
 		return;
 
-	Overlay.Rect = Overlay.Monitor->Rect;
+	overlay.bounds = overlay.monitor->bounds;
 
 #if HALF_MONITOR
-    Overlay.Rect.Width = Overlay.Rect.Width / 2;
-    Overlay.Rect.X += Overlay.Rect.Width;
+    overlay.bounds.Width = overlay.bounds.Width / 2;
+    overlay.bounds.X += overlay.bounds.Width;
 #endif
 
-    SetWindowPos(Overlay.hWnd, HWND_TOPMOST, Overlay.Rect.X, Overlay.Rect.Y, Overlay.Rect.Width, Overlay.Rect.Height, SWP_SHOWWINDOW);
+    SetWindowPos(overlay.hWnd, HWND_TOPMOST, overlay.bounds.x, overlay.bounds.y, overlay.bounds.width, overlay.bounds.height, SWP_SHOWWINDOW);
 
-    Overlay.Monitor->Root->Rect = Overlay.Rect;
+    overlay.monitor->root->bounds = overlay.bounds;
 
-    Overlay.IsOpen = true;
+    overlay.isOpen = true;
 }
 
 void HideOverlay()
 {
-    ShowWindow(Overlay.hWnd, SW_HIDE);
+    ShowWindow(overlay.hWnd, SW_HIDE);
 
-    Overlay.IsOpen = false;
+    overlay.isOpen = false;
 }
 
 void OnOverlayHotkey()
 {
-    if (!Overlay.IsOpen)
+    if (!overlay.isOpen)
     {
         PickOnDeckWindow();
         ShowOverlay();
@@ -344,48 +368,48 @@ void OnOverlayHotkey()
     }
 }
 
-void OnOverlayMouse(UINT Message, UINT Buttons, int X, int Y)
+void OnOverlayMouse(UINT message, UINT buttons, int x, int y)
 {
-    if (!Overlay.IsOpen)
+    if (!overlay.isOpen)
     {
-        ReportError("Overlay received a mouse event %d at %d %d when it was not open", Message, X, Y);
+        ReportError("Overlay received a mouse event %d at %d %d when it was not open", message, x, y);
         return;
     }
 
-    Old = New;
-    New.X = X + Overlay.Rect.X;
-    New.Y = Y + Overlay.Rect.Y;
-    New.Buttons = Buttons;
-    New.Key = 0;
+    oldInput = newInput;
+	newInput.position.x = x + overlay.bounds.x;
+	newInput.position.y = y + overlay.bounds.y;
+	newInput.buttons = buttons;
+	newInput.key = 0;
 
-	Overlay.Monitor->Root->OnInputFn(Overlay.Monitor->Root);
+	overlay.monitor->root->onInputFn(overlay.monitor->root);
 
-    InvalidateRect(Overlay.hWnd, NULL, TRUE);
+    InvalidateRect(overlay.hWnd, NULL, TRUE);
 
-    if (Message == WM_LBUTTONUP)
+    if (message == WM_LBUTTONUP)
     {
         HideOverlay();
         PlaceOnDeckWindow();
     }
 }
 
-void OnOverlayKey(UINT Key)
+void OnOverlayKey(UINT key)
 {
-	if (!Overlay.IsOpen)
+	if (!overlay.isOpen)
 	{
-		ReportError("Overlay received a key event %d when it was not open", Key);
+		ReportError("Overlay received a key event %d when it was not open", key);
 		return;
 	}
 
-	Old = New;
-    New.Key = Key;
-	New.Shift = GetAsyncKeyState(VK_SHIFT) || GetAsyncKeyState(VK_LSHIFT);
+	oldInput = newInput;
+	newInput.key = key;
+	newInput.shift = GetAsyncKeyState(VK_SHIFT) || GetAsyncKeyState(VK_LSHIFT);
 
-	Overlay.Monitor->Root->OnInputFn(Overlay.Monitor->Root);
+	overlay.monitor->root->onInputFn(overlay.monitor->root);
 
-    InvalidateRect(Overlay.hWnd, NULL, TRUE);
+    InvalidateRect(overlay.hWnd, NULL, TRUE);
 
-    if (Key == VK_ESCAPE)
+    if (key == VK_ESCAPE)
     {
         HideOverlay();
         ClearOnDeckWindow();
@@ -394,38 +418,38 @@ void OnOverlayKey(UINT Key)
 
 void OnOverlayPaint()
 {
-	if (!Overlay.IsOpen)
+	if (!overlay.isOpen)
 	{
 		ReportError("Overlay received a paint event");
 		return;
 	}
 
-	Draw.hdc = BeginPaint(Overlay.hWnd, &Draw.ps);
+	draw.hdc = BeginPaint(overlay.hWnd, &draw.ps);
 
     RECT rc;
-    GetClientRect(Overlay.hWnd, &rc);
+    GetClientRect(overlay.hWnd, &rc);
 
-    HDC hdcMem  = CreateCompatibleDC(Draw.hdc);
-    HBITMAP hbmMem = CreateCompatibleBitmap(Draw.hdc, rc.right - rc.left, rc.bottom - rc.top);
+    HDC hdcMem  = CreateCompatibleDC(draw.hdc);
+    HBITMAP hbmMem = CreateCompatibleBitmap(draw.hdc, rc.right - rc.left, rc.bottom - rc.top);
     SelectObject(hdcMem, hbmMem);
 
     HBRUSH hbrBkGnd = CreateSolidBrush(GetSysColor(COLOR_WINDOW));
     FillRect(hdcMem, &rc, hbrBkGnd);
     DeleteObject(hbrBkGnd);
 
-    Draw.g = new Gdiplus::Graphics(hdcMem);
+    draw.g = new Gdiplus::Graphics(hdcMem);
 
-	Overlay.Monitor->Root->OnDrawFn(Overlay.Monitor->Root);
+	overlay.monitor->root->onDrawFn(overlay.monitor->root);
 
-    delete Draw.g;
-    Draw.g = NULL;
+    delete draw.g;
+    draw.g = NULL;
 
-    BitBlt(Draw.hdc, rc.left, rc.top, rc.right-rc.left, rc.bottom-rc.top, hdcMem, 0, 0, SRCCOPY);
+    BitBlt(draw.hdc, rc.left, rc.top, rc.right-rc.left, rc.bottom-rc.top, hdcMem, 0, 0, SRCCOPY);
 
     DeleteObject(hbmMem);
     DeleteDC(hdcMem);
 
-    EndPaint(Overlay.hWnd, &Draw.ps); 
+    EndPaint(overlay.hWnd, &draw.ps); 
 }
 
 LRESULT CALLBACK OverlayWindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -472,8 +496,8 @@ void CreateOverlay()
     wcex.cbSize = sizeof(WNDCLASSEX);
     wcex.style = CS_HREDRAW | CS_VREDRAW;
     wcex.lpfnWndProc = OverlayWindowProc;
-    wcex.hInstance = Win.hInst;
-    wcex.hIcon = LoadIcon(Win.hInst, MAKEINTRESOURCE(IDR_ICON));
+    wcex.hInstance = win.hInst;
+    wcex.hIcon = LoadIcon(win.hInst, MAKEINTRESOURCE(IDR_ICON));
     wcex.hCursor = LoadCursor(NULL, IDC_ARROW);
     wcex.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wcex.lpszClassName = "WINDY_MAIN";
@@ -482,18 +506,17 @@ void CreateOverlay()
     RECT rc = { 0, 0, 100, 100};
     CheckWin32(AdjustWindowRect(&rc, WS_POPUP, FALSE));
 
-    Overlay.hWnd = CreateWindow("WINDY_MAIN", "Windy", WS_POPUPWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top, NULL, NULL, Win.hInst, NULL);
+    overlay.hWnd = CreateWindow("WINDY_MAIN", "Windy", WS_POPUPWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top, NULL, NULL, win.hInst, NULL);
 
-    SetWindowLong(Overlay.hWnd, GWL_EXSTYLE, GetWindowLong(Overlay.hWnd, GWL_EXSTYLE) | WS_EX_LAYERED);
-    SetLayeredWindowAttributes(Overlay.hWnd, 0, OVERLAY_ALPHA, LWA_ALPHA);
+    SetWindowLong(overlay.hWnd, GWL_EXSTYLE, GetWindowLong(overlay.hWnd, GWL_EXSTYLE) | WS_EX_LAYERED);
+    SetLayeredWindowAttributes(overlay.hWnd, 0, OVERLAY_ALPHA, LWA_ALPHA);
 
-    CheckWin32(RegisterHotKey(Overlay.hWnd, HOTKEY_ID, HOTKEY_META, HOTKEY_CODE));
+    CheckWin32(RegisterHotKey(overlay.hWnd, HOTKEY_ID, HOTKEY_META, HOTKEY_CODE));
 }
 
 int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nCmdShow)
 {
     SetProcessDpiAwareness((PROCESS_DPI_AWARENESS)PROCESS_PER_MONITOR_DPI_AWARE);
-
 
     Gdiplus::GdiplusStartupInput gdiplusStartupInput;
     ULONG_PTR gdiplusToken;
@@ -503,14 +526,14 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_ HINSTANCE hPrevInstance, _In
 
     for (;;)
     {
-        MSG Msg;
-        BOOL Result = GetMessage(&Msg, NULL, 0, 0);
-        if (Result < 0)
+        MSG msg;
+        BOOL result = GetMessage(&msg, NULL, 0, 0);
+        if (result < 0)
             FatalWin32Error("GetMessage failed");
-        if (Result == 0)
+        if (result == 0)
             break;
-        TranslateMessage(&Msg);
-        DispatchMessage(&Msg);
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
     }
 
     Gdiplus::GdiplusShutdown(gdiplusToken);
