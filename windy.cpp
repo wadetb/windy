@@ -1,8 +1,9 @@
+#include <stddef.h>
 #include <WindowsX.h>
 #include <ShellScalingAPI.h>
 #include <GDIPlus.h>
 
-#define HALF_MONITOR 1
+#define HALF_MONITOR 0
 
 #define HOTKEY_ID   1
 #define HOTKEY_META MOD_WIN
@@ -35,6 +36,7 @@ struct {
 } OnDeck;
 
 struct {
+	struct Monitor *Monitor;
     HWND hWnd;
     struct Rect Rect;
     bool IsOpen;
@@ -106,8 +108,8 @@ struct Input
     int X;
     int Y;
     int Buttons;
-    int Mods;
     int Key;
+	bool Shift;
 };
 
 struct Input Old;
@@ -145,7 +147,8 @@ struct Shelf
     int HoverCol;
 };
 
-#define Unwrap(type_, member_, ptr_) (type_ *)((char *)ptr_ - offsetof(type_, member_))
+#define OffsetOf(type_, member_) (size_t)( (ptrdiff_t)&reinterpret_cast<const volatile char&>((((type_ *)0)->member_)) )
+#define Unwrap(type_, member_, ptr_) (type_ *)((char *)ptr_ - OffsetOf(type_, member_))
 
 void ShelfDraw(struct Bin *Bin)
 {
@@ -174,13 +177,15 @@ void ShelfInput(struct Bin *Bin)
 {
     struct Shelf *Shelf = Unwrap(struct Shelf, Bin, Bin);
 
-    if (New.Key == 'C' && !GetAsyncKeyState(VK_SHIFT))
+    if (New.Key == 'C' && !New.Shift)
         Shelf->Cols++;
-    if (New.Key == 'C' && GetAsyncKeyState(VK_SHIFT))
-        Shelf->Cols--; // $$$ CLAMP ME
+    if (New.Key == 'C' && New.Shift && Shelf->Cols > 1)
+        Shelf->Cols--;
     
-    if (New.Key == 'R')
-        Shelf->Rows++;
+	if (New.Key == 'R' && !New.Shift)
+		Shelf->Rows++;
+	if (New.Key == 'R' && New.Shift && Shelf->Rows > 1)
+		Shelf->Rows--;
 
     Shelf->HoverRow = -1;
     Shelf->HoverCol = -1;
@@ -216,11 +221,59 @@ struct Shelf *NewShelf()
     return Shelf;
 }
 
-struct Bin *Root;
+#define MONITOR_LIMIT 16
 
-void InitBin()
+struct Monitor
 {
-    Root = &NewShelf()->Bin;   
+	HMONITOR hMonitor;
+	MONITORINFO Info;
+	struct Rect Rect;
+	struct Bin *Root;
+};
+
+struct Monitor Monitors[MAX_MONITORS];
+
+void UpdateMonitorInfo(struct Monitor *Monitor)
+{
+	Monitor->Info = { sizeof(MONITORINFO) };
+	CheckWin32(GetMonitorInfo(Monitor->hMonitor, &Monitor->Info));
+
+	Monitor->Rect.X = Monitor->Info.rcWork.left;
+	Monitor->Rect.Y = Monitor->Info.rcWork.top;
+	Monitor->Rect.Width = Monitor->Info.rcWork.right - Monitor->Info.rcWork.left;
+	Monitor->Rect.Height = Monitor->Info.rcWork.bottom - Monitor->Info.rcWork.top;
+}
+
+struct Monitor *GetMonitorAtCursor()
+{
+	POINT MousePt = {};
+	CheckWin32(GetCursorPos(&MousePt));
+
+	HMONITOR hMonitor = MonitorFromPoint(MousePt, MONITOR_DEFAULTTONULL);
+	if (hMonitor == NULL)
+	{
+		ReportError("Mouse position %d %d was not over any monitor", MousePt.x, MousePt.y);
+		return NULL;
+	}
+
+	for (int i = 0; i < MONITOR_LIMIT; i++)
+	{
+		struct Monitor *Monitor = &Monitors[i];
+		if (Monitor->hMonitor == NULL)
+		{
+			Monitor->hMonitor = hMonitor;
+			Monitor->Root = &NewShelf()->Bin;
+			UpdateMonitorInfo(Monitor);
+			return Monitor;
+		}
+		if (Monitor->hMonitor == hMonitor)
+		{
+			UpdateMonitorInfo(Monitor);
+			return Monitor;
+		}
+	}
+
+	return NULL;
 }
 
 void PickOnDeckWindow()
@@ -230,7 +283,8 @@ void PickOnDeckWindow()
 
     OnDeck.PlaceRect = { 100, 100, 800, 600 };
 
-    OnDeck.hWnd = WindowFromPoint(MousePt);
+	HWND hWnd = WindowFromPoint(MousePt);
+	OnDeck.hWnd = GetAncestor(hWnd, GA_ROOT);
 }
 
 void ClearOnDeckWindow()
@@ -251,20 +305,11 @@ void PlaceOnDeckWindow()
 
 void ShowOverlay()
 {
-    POINT MousePt = {};
-    CheckWin32(GetCursorPos(&MousePt));
+	Overlay.Monitor = GetMonitorAtCursor();
+	if (Overlay.Monitor == NULL)
+		return;
 
-    HMONITOR hMonitor = MonitorFromPoint(MousePt, MONITOR_DEFAULTTONULL);
-    if (hMonitor == NULL)
-        ReportError("Mouse position %d %d was not over any monitor", MousePt.x, MousePt.y);
-
-    MONITORINFO MonitorInfo = { sizeof(MONITORINFO) };
-    CheckWin32(GetMonitorInfo(hMonitor, &MonitorInfo));
-
-    Overlay.Rect.X = MonitorInfo.rcWork.left;
-    Overlay.Rect.Y = MonitorInfo.rcWork.top;
-    Overlay.Rect.Width = MonitorInfo.rcWork.right - MonitorInfo.rcWork.left;
-    Overlay.Rect.Height = MonitorInfo.rcWork.bottom - MonitorInfo.rcWork.top;
+	Overlay.Rect = Overlay.Monitor->Rect;
 
 #if HALF_MONITOR
     Overlay.Rect.Width = Overlay.Rect.Width / 2;
@@ -273,7 +318,7 @@ void ShowOverlay()
 
     SetWindowPos(Overlay.hWnd, HWND_TOPMOST, Overlay.Rect.X, Overlay.Rect.Y, Overlay.Rect.Width, Overlay.Rect.Height, SWP_SHOWWINDOW);
 
-    Root->Rect = Overlay.Rect;
+    Overlay.Monitor->Root->Rect = Overlay.Rect;
 
     Overlay.IsOpen = true;
 }
@@ -313,7 +358,7 @@ void OnOverlayMouse(UINT Message, UINT Buttons, int X, int Y)
     New.Buttons = Buttons;
     New.Key = 0;
 
-    Root->OnInputFn(Root);
+	Overlay.Monitor->Root->OnInputFn(Overlay.Monitor->Root);
 
     InvalidateRect(Overlay.hWnd, NULL, TRUE);
 
@@ -326,10 +371,17 @@ void OnOverlayMouse(UINT Message, UINT Buttons, int X, int Y)
 
 void OnOverlayKey(UINT Key)
 {
-    Old = New;
-    New.Key = Key;
+	if (!Overlay.IsOpen)
+	{
+		ReportError("Overlay received a key event %d when it was not open", Key);
+		return;
+	}
 
-    Root->OnInputFn(Root);
+	Old = New;
+    New.Key = Key;
+	New.Shift = GetAsyncKeyState(VK_SHIFT) || GetAsyncKeyState(VK_LSHIFT);
+
+	Overlay.Monitor->Root->OnInputFn(Overlay.Monitor->Root);
 
     InvalidateRect(Overlay.hWnd, NULL, TRUE);
 
@@ -342,7 +394,13 @@ void OnOverlayKey(UINT Key)
 
 void OnOverlayPaint()
 {
-    Draw.hdc = BeginPaint(Overlay.hWnd, &Draw.ps); 
+	if (!Overlay.IsOpen)
+	{
+		ReportError("Overlay received a paint event");
+		return;
+	}
+
+	Draw.hdc = BeginPaint(Overlay.hWnd, &Draw.ps);
 
     RECT rc;
     GetClientRect(Overlay.hWnd, &rc);
@@ -357,9 +415,7 @@ void OnOverlayPaint()
 
     Draw.g = new Gdiplus::Graphics(hdcMem);
 
-    DrawText(200, 200, 30, "Hello blah blah");
-
-    Root->OnDrawFn(Root);
+	Overlay.Monitor->Root->OnDrawFn(Overlay.Monitor->Root);
 
     delete Draw.g;
     Draw.g = NULL;
@@ -391,7 +447,7 @@ LRESULT CALLBACK OverlayWindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
         OnOverlayMouse(message, wParam, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         break;
 
-    case WM_CHAR:
+    case WM_KEYDOWN:
         OnOverlayKey(wParam);
         break;
 
@@ -442,8 +498,6 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_ HINSTANCE hPrevInstance, _In
     Gdiplus::GdiplusStartupInput gdiplusStartupInput;
     ULONG_PTR gdiplusToken;
     GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
-
-    InitBin();
 
     CreateOverlay();
 
