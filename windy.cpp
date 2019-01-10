@@ -171,7 +171,257 @@ struct Cell *NewCell() {
   return cell;
 }
 
+enum ShelfDirection { ShelfDirection_Horizontal, ShelfDirection_Vertical };
+
 struct Shelf {
+  struct Bin bin;
+
+  enum ShelfDirection direction;
+
+  int slotCount;
+
+  int hoverSlot;
+
+  struct Bin **bins;
+};
+
+struct Shelf *NewShelf(enum ShelfDirection direction, int count);
+struct Bounds ShelfMakeCellBounds(struct Shelf *shelf, int slot);
+
+struct Bin *ShelfGet(struct Shelf *shelf, int slot) {
+  AssertNotNull(shelf);
+  AssertNotNull(shelf->bins);
+  AssertIndex(slot, shelf->slotCount);
+
+  return shelf->bins[slot];
+}
+
+void ShelfPut(struct Shelf *shelf, int slot, struct Bin *bin) {
+  AssertNotNull(shelf);
+  AssertNotNull(shelf->bins);
+  AssertIndex(slot, shelf->slotCount);
+
+  AssertNull(shelf->bins[slot]);
+
+  shelf->bins[slot] = bin;
+
+  if (bin != NULL) {
+    bin->bounds = ShelfMakeCellBounds(shelf, slot);
+    if (bin->onLayoutFn)
+      bin->onLayoutFn(bin);
+  }
+}
+
+void ShelfClear(struct Shelf *shelf, int slot) {
+  AssertNotNull(shelf);
+  AssertNotNull(shelf->bins);
+  AssertIndex(slot, shelf->slotCount);
+
+  struct Bin *bin = shelf->bins[slot];
+  if (bin != NULL) {
+    if (bin->onDestroyFn != NULL)
+      bin->onDestroyFn(bin);
+
+    free(bin);
+    shelf->bins[slot] = NULL;
+  }
+}
+
+void ShelfInsert(struct Shelf *shelf, int newSlot) {
+  AssertNotNull(shelf);
+  AssertIndex(newSlot, shelf->slotCount + 1);
+
+  struct Bin **oldBins = shelf->bins;
+  AssertNotNull(oldBins);
+
+  shelf->slotCount += 1;
+  shelf->bins = AllocateArray(struct Bin *, shelf->slotCount);
+
+  for (int slot = 0; slot < newSlot; slot++)
+    ShelfPut(shelf, slot, oldBins[slot]);
+
+  struct Cell *newCell = NewCell();
+  struct Bin *newBin = Wrap(newCell, bin);
+  ShelfPut(shelf, newSlot, newBin);
+
+  for (int slot = newSlot + 1; slot < shelf->slotCount; slot++)
+    ShelfPut(shelf, slot, oldBins[slot - 1]);
+
+  free(oldBins);
+}
+
+void ShelfDelete(struct Shelf *shelf, int oldSlot) {
+  AssertNotNull(shelf);
+  AssertIndex(oldSlot, shelf->slotCount);
+
+  ShelfClear(shelf, oldSlot);
+
+  struct Bin **oldBins = shelf->bins;
+  AssertNotNull(oldBins);
+
+  shelf->slotCount -= 1;
+  shelf->bins = AllocateArray(struct Bin *, shelf->slotCount);
+
+  for (int slot = 0; slot < oldSlot; slot++)
+    ShelfPut(shelf, slot, oldBins[slot]);
+
+  for (int slot = oldSlot; slot < shelf->slotCount; slot++)
+    ShelfPut(shelf, slot, oldBins[slot + 1]);
+
+  free(oldBins);
+}
+
+struct Bounds ShelfMakeCellBounds(struct Shelf *shelf, int slot) {
+  AssertNotNull(shelf);
+  AssertIndex(slot, shelf->slotCount);
+
+  AssertGreater(shelf->slotCount, 0);
+
+  struct Bounds bounds;
+
+  if (shelf->direction == ShelfDirection_Vertical) {
+    bounds.width = (shelf->bin.bounds.width - (1 + 1) * BORDER_INSET) / 1;
+    bounds.height = (shelf->bin.bounds.height - (shelf->slotCount + 1) * BORDER_INSET) / shelf->slotCount;
+    bounds.x = shelf->bin.bounds.x + 0 * (bounds.width + BORDER_INSET) + BORDER_INSET;
+    bounds.y = shelf->bin.bounds.y + slot * (bounds.height + BORDER_INSET) + BORDER_INSET;
+  } else {
+    bounds.width = (shelf->bin.bounds.width - (shelf->slotCount + 1) * BORDER_INSET) / shelf->slotCount;
+    bounds.height = (shelf->bin.bounds.height - (1 + 1) * BORDER_INSET) / 1;
+    bounds.x = shelf->bin.bounds.x + slot * (bounds.width + BORDER_INSET) + BORDER_INSET;
+    bounds.y = shelf->bin.bounds.y + 0 * (bounds.height + BORDER_INSET) + BORDER_INSET;
+  }
+
+  return bounds;
+}
+
+void ShelfDraw(struct Bin *bin) {
+  AssertNotNull(bin);
+
+  struct Shelf *shelf = Unwrap(struct Shelf, bin, bin);
+
+  for (int slot = 0; slot < shelf->slotCount; slot++) {
+    struct Bin *bin = ShelfGet(shelf, slot);
+    if (bin->onDrawFn)
+      bin->onDrawFn(bin);
+
+    struct Bounds bounds = ShelfMakeCellBounds(shelf, slot);
+
+    bool dashed = false;
+    if (slot == shelf->hoverSlot)
+      dashed = true;
+
+    DrawRectangle(bounds, BORDER_WIDTH, dashed);
+  }
+}
+
+void ShelfInput(struct Bin *bin) {
+  AssertNotNull(bin);
+
+  struct Shelf *shelf = Unwrap(struct Shelf, bin, bin);
+
+  shelf->hoverSlot = -1;
+
+  for (int column = 0; column < shelf->slotCount; column++) {
+    struct Bounds bounds = ShelfMakeCellBounds(shelf, column);
+    if (PointInBounds(newInput.position, bounds)) {
+      shelf->hoverSlot = column;
+    }
+  }
+
+  if (shelf->hoverSlot != -1) {
+    struct Bin *hoverBin = ShelfGet(shelf, shelf->hoverSlot);
+    if (hoverBin != NULL) {
+      if (hoverBin->onInputFn)
+        hoverBin->onInputFn(hoverBin);
+    }
+
+    if (!newInput.used) {
+      if (newInput.key == 'X') {
+        if (shelf->slotCount > 1) {
+          ShelfDelete(shelf, shelf->hoverSlot);
+          newInput.used = true;
+        }
+        // Pass other cases up to the parent to deal with.
+      }
+
+      if (newInput.key == 'H') {
+        if (shelf->direction == ShelfDirection_Horizontal) {
+          ShelfInsert(shelf, shelf->hoverSlot);
+          newInput.used = true;
+        } else {
+          ShelfClear(shelf, shelf->hoverSlot);
+          struct Shelf *newShelf = NewShelf(ShelfDirection_Horizontal, 2);
+          struct Bin *newBin = Wrap(newShelf, bin);
+          ShelfPut(shelf, shelf->hoverSlot, newBin);
+          newInput.used = true;
+        }
+      }
+
+      if (newInput.key == 'V') {
+        if (shelf->direction == ShelfDirection_Vertical) {
+          ShelfInsert(shelf, shelf->hoverSlot);
+          newInput.used = true;
+        } else {
+          ShelfClear(shelf, shelf->hoverSlot);
+          struct Shelf *newShelf = NewShelf(ShelfDirection_Vertical, 2);
+          struct Bin *newBin = Wrap(newShelf, bin);
+          ShelfPut(shelf, shelf->hoverSlot, newBin);
+          newInput.used = true;
+        }
+      }
+    }
+  }
+}
+
+void ShelfLayout(struct Bin *bin) {
+  AssertNotNull(bin);
+
+  struct Shelf *shelf = Unwrap(struct Shelf, bin, bin);
+
+    for (int slot = 0; slot < shelf->slotCount; slot++) {
+      struct Bin *bin = ShelfGet(shelf, slot);
+      if (bin != NULL) {
+        bin->bounds = ShelfMakeCellBounds(shelf, slot);
+        if (bin->onLayoutFn != NULL)
+          bin->onLayoutFn(bin);
+      }
+    }
+}
+
+void ShelfDestroy(struct Bin *bin) {
+  AssertNotNull(bin);
+
+  struct Shelf *shelf = Unwrap(struct Shelf, bin, bin);
+
+    for (int slot = 0; slot < shelf->slotCount; slot++)
+      ShelfClear(shelf, slot);
+
+  free(shelf->bins);
+}
+
+struct Shelf *NewShelf(enum ShelfDirection direction, int count) {
+  struct Shelf *shelf = Allocate(struct Shelf);
+  shelf->bin.onDrawFn = ShelfDraw;
+  shelf->bin.onInputFn = ShelfInput;
+  shelf->bin.onLayoutFn = ShelfLayout;
+  shelf->bin.onDestroyFn = ShelfDestroy;
+
+  shelf->direction = direction;
+
+  shelf->slotCount = count;
+  shelf->bins = AllocateArray(struct Bin *, shelf->slotCount);
+
+  for (int slot = 0; slot < shelf->slotCount; slot++)
+  {
+    struct Cell *newCell = NewCell();
+    struct Bin *newBin = Wrap(newCell, bin);
+    ShelfPut(shelf, slot, newBin);
+  }
+
+  return shelf;
+}
+
+struct Grid {
   struct Bin bin;
 
   int rowCount;
@@ -183,187 +433,187 @@ struct Shelf {
   struct Bin **bins;
 };
 
-struct Shelf *NewShelf();
-struct Bounds ShelfMakeCellBounds(struct Shelf *shelf, int row, int column);
+struct Grid *NewGrid();
+struct Bounds GridMakeCellBounds(struct Grid *grid, int row, int column);
 
-struct Bin *ShelfGet(struct Shelf *shelf, int row, int column) {
-  AssertNotNull(shelf);
-  AssertNotNull(shelf->bins);
-  AssertIndex(row, shelf->rowCount);
-  AssertIndex(column, shelf->columnCount);
+struct Bin *Grid(struct Grid *grid, int row, int column) {
+  AssertNotNull(grid);
+  AssertNotNull(grid->bins);
+  AssertIndex(row, grid->rowCount);
+  AssertIndex(column, grid->columnCount);
 
-  int index = shelf->columnCount * row + column;
+  int index = grid->columnCount * row + column;
 
-  return shelf->bins[index];
+  return grid->bins[index];
 }
 
-void ShelfPut(struct Shelf *shelf, int row, int column, struct Bin *bin) {
-  AssertNotNull(shelf);
-  AssertNotNull(shelf->bins);
-  AssertIndex(row, shelf->rowCount);
-  AssertIndex(column, shelf->columnCount);
+void GridPut(struct Grid *grid, int row, int column, struct Bin *bin) {
+  AssertNotNull(grid);
+  AssertNotNull(grid->bins);
+  AssertIndex(row, grid->rowCount);
+  AssertIndex(column, grid->columnCount);
 
-  int index = shelf->columnCount * row + column;
-  AssertNull(shelf->bins[index]);
+  int index = grid->columnCount * row + column;
+  AssertNull(grid->bins[index]);
 
-  shelf->bins[index] = bin;
+  grid->bins[index] = bin;
 
   if (bin != NULL) {
-    bin->bounds = ShelfMakeCellBounds(shelf, row, column);
+    bin->bounds = GridMakeCellBounds(grid, row, column);
     if (bin->onLayoutFn)
       bin->onLayoutFn(bin);
   }
 }
 
-void ShelfClear(struct Shelf *shelf, int row, int column) {
-  AssertNotNull(shelf);
-  AssertNotNull(shelf->bins);
-  AssertIndex(row, shelf->rowCount);
-  AssertIndex(column, shelf->columnCount);
+void GridClear(struct Grid *grid, int row, int column) {
+  AssertNotNull(grid);
+  AssertNotNull(grid->bins);
+  AssertIndex(row, grid->rowCount);
+  AssertIndex(column, grid->columnCount);
 
-  int index = shelf->columnCount * row + column;
+  int index = grid->columnCount * row + column;
 
-  struct Bin *bin = shelf->bins[index];
+  struct Bin *bin = grid->bins[index];
   if (bin != NULL) {
     if (bin->onDestroyFn != NULL)
       bin->onDestroyFn(bin);
 
     free(bin);
-    shelf->bins[index] = NULL;
+    grid->bins[index] = NULL;
   }
 }
 
-void ShelfInsertRow(struct Shelf *shelf, int newRow) {
-  AssertNotNull(shelf);
-  AssertIndex(newRow, shelf->rowCount + 1);
+void GridInsertRow(struct Grid *grid, int newRow) {
+  AssertNotNull(grid);
+  AssertIndex(newRow, grid->rowCount + 1);
 
-  struct Bin **oldBins = shelf->bins;
+  struct Bin **oldBins = grid->bins;
   AssertNotNull(oldBins);
 
-  shelf->rowCount += 1;
-  shelf->bins = AllocateArray(struct Bin *, shelf->rowCount * shelf->columnCount);
+  grid->rowCount += 1;
+  grid->bins = AllocateArray(struct Bin *, grid->rowCount * grid->columnCount);
 
-  for (int column = 0; column < shelf->columnCount; column++) {
+  for (int column = 0; column < grid->columnCount; column++) {
     for (int row = 0; row < newRow; row++)
-      ShelfPut(shelf, row, column, oldBins[shelf->columnCount * row + column]);
+      GridPut(grid, row, column, oldBins[grid->columnCount * row + column]);
 
     struct Cell *newCell = NewCell();
     struct Bin *newBin = Wrap(newCell, bin);
-    ShelfPut(shelf, newRow, column, newBin);
+    GridPut(grid, newRow, column, newBin);
 
-    for (int row = newRow + 1; row < shelf->rowCount; row++)
-      ShelfPut(shelf, row, column, oldBins[shelf->columnCount * (row - 1) + column]);
+    for (int row = newRow + 1; row < grid->rowCount; row++)
+      GridPut(grid, row, column, oldBins[grid->columnCount * (row - 1) + column]);
   }
 
   free(oldBins);
 }
 
-void ShelfDeleteRow(struct Shelf *shelf, int oldRow) {
-  AssertNotNull(shelf);
-  AssertIndex(oldRow, shelf->rowCount);
+void GridDeleteRow(struct Grid *grid, int oldRow) {
+  AssertNotNull(grid);
+  AssertIndex(oldRow, grid->rowCount);
 
-  for (int column = 0; column < shelf->columnCount; column++)
-    ShelfClear(shelf, oldRow, column);
+  for (int column = 0; column < grid->columnCount; column++)
+    GridClear(grid, oldRow, column);
 
-  struct Bin **oldBins = shelf->bins;
+  struct Bin **oldBins = grid->bins;
   AssertNotNull(oldBins);
 
-  shelf->rowCount -= 1;
-  shelf->bins = AllocateArray(struct Bin *, shelf->rowCount * shelf->columnCount);
+  grid->rowCount -= 1;
+  grid->bins = AllocateArray(struct Bin *, grid->rowCount * grid->columnCount);
 
-  for (int column = 0; column < shelf->columnCount; column++) {
+  for (int column = 0; column < grid->columnCount; column++) {
     for (int row = 0; row < oldRow; row++)
-      ShelfPut(shelf, row, column, oldBins[shelf->columnCount * row + column]);
+      GridPut(grid, row, column, oldBins[grid->columnCount * row + column]);
 
-    for (int row = oldRow; row < shelf->rowCount; row++)
-      ShelfPut(shelf, row, column, oldBins[shelf->columnCount * (row + 1) + column]);
+    for (int row = oldRow; row < grid->rowCount; row++)
+      GridPut(grid, row, column, oldBins[grid->columnCount * (row + 1) + column]);
   }
 
   free(oldBins);
 }
 
-void ShelfInsertColumn(struct Shelf *shelf, int newColumn) {
-  AssertNotNull(shelf);
-  AssertIndex(newColumn, shelf->columnCount + 1);
+void GridInsertColumn(struct Grid *grid, int newColumn) {
+  AssertNotNull(grid);
+  AssertIndex(newColumn, grid->columnCount + 1);
 
-  int oldColumnCount = shelf->columnCount;
-  struct Bin **oldBins = shelf->bins;
+  int oldColumnCount = grid->columnCount;
+  struct Bin **oldBins = grid->bins;
   AssertNotNull(oldBins);
 
-  shelf->columnCount += 1;
-  shelf->bins = AllocateArray(struct Bin *, shelf->rowCount * shelf->columnCount);
+  grid->columnCount += 1;
+  grid->bins = AllocateArray(struct Bin *, grid->rowCount * grid->columnCount);
 
-  for (int row = 0; row < shelf->rowCount; row++) {
+  for (int row = 0; row < grid->rowCount; row++) {
     for (int column = 0; column < newColumn; column++)
-      ShelfPut(shelf, row, column, oldBins[oldColumnCount * row + column]);
+      GridPut(grid, row, column, oldBins[oldColumnCount * row + column]);
 
     struct Cell *newCell = NewCell();
     struct Bin *newBin = Wrap(newCell, bin);
-    ShelfPut(shelf, row, newColumn, newBin);
+    GridPut(grid, row, newColumn, newBin);
 
-    for (int column = newColumn + 1; column < shelf->columnCount; column++)
-      ShelfPut(shelf, row, column, oldBins[oldColumnCount * row + column - 1]);
+    for (int column = newColumn + 1; column < grid->columnCount; column++)
+      GridPut(grid, row, column, oldBins[oldColumnCount * row + column - 1]);
   }
 
   free(oldBins);
 }
 
-void ShelfDeleteColumn(struct Shelf *shelf, int oldColumn) {
-  AssertNotNull(shelf);
-  AssertIndex(oldColumn, shelf->columnCount);
+void GridDeleteColumn(struct Grid *grid, int oldColumn) {
+  AssertNotNull(grid);
+  AssertIndex(oldColumn, grid->columnCount);
 
-  for (int row = 0; row < shelf->rowCount; row++)
-    ShelfClear(shelf, row, oldColumn);
+  for (int row = 0; row < grid->rowCount; row++)
+    GridClear(grid, row, oldColumn);
 
-  int oldColumnCount = shelf->columnCount;
-  struct Bin **oldBins = shelf->bins;
+  int oldColumnCount = grid->columnCount;
+  struct Bin **oldBins = grid->bins;
   AssertNotNull(oldBins);
 
-  shelf->columnCount -= 1;
-  shelf->bins = AllocateArray(struct Bin *, shelf->rowCount * shelf->columnCount);
+  grid->columnCount -= 1;
+  grid->bins = AllocateArray(struct Bin *, grid->rowCount * grid->columnCount);
 
-  for (int row = 0; row < shelf->rowCount; row++) {
+  for (int row = 0; row < grid->rowCount; row++) {
     for (int column = 0; column < oldColumn; column++)
-      ShelfPut(shelf, row, column, oldBins[oldColumnCount * row + column]);
+      GridPut(grid, row, column, oldBins[oldColumnCount * row + column]);
 
-    for (int column = oldColumn; column < shelf->columnCount; column++)
-      ShelfPut(shelf, row, column, oldBins[oldColumnCount * row + column + 1]);
+    for (int column = oldColumn; column < grid->columnCount; column++)
+      GridPut(grid, row, column, oldBins[oldColumnCount * row + column + 1]);
   }
 
   free(oldBins);
 }
 
-struct Bounds ShelfMakeCellBounds(struct Shelf *shelf, int row, int column) {
-  AssertNotNull(shelf);
-  AssertIndex(row, shelf->rowCount);
-  AssertIndex(column, shelf->columnCount);
+struct Bounds GridMakeCellBounds(struct Grid *grid, int row, int column) {
+  AssertNotNull(grid);
+  AssertIndex(row, grid->rowCount);
+  AssertIndex(column, grid->columnCount);
 
-  AssertGreater(shelf->columnCount, 0);
-  AssertGreater(shelf->rowCount, 0);
+  AssertGreater(grid->columnCount, 0);
+  AssertGreater(grid->rowCount, 0);
 
   struct Bounds bounds;
-  bounds.width = (shelf->bin.bounds.width - (shelf->columnCount + 1) * BORDER_INSET) / shelf->columnCount;
-  bounds.height = (shelf->bin.bounds.height - (shelf->rowCount + 1) * BORDER_INSET) / shelf->rowCount;
-  bounds.x = shelf->bin.bounds.x + column * (bounds.width + BORDER_INSET) + BORDER_INSET;
-  bounds.y = shelf->bin.bounds.y + row * (bounds.height + BORDER_INSET) + BORDER_INSET;
+  bounds.width = (grid->bin.bounds.width - (grid->columnCount + 1) * BORDER_INSET) / grid->columnCount;
+  bounds.height = (grid->bin.bounds.height - (grid->rowCount + 1) * BORDER_INSET) / grid->rowCount;
+  bounds.x = grid->bin.bounds.x + column * (bounds.width + BORDER_INSET) + BORDER_INSET;
+  bounds.y = grid->bin.bounds.y + row * (bounds.height + BORDER_INSET) + BORDER_INSET;
   return bounds;
 }
 
-void ShelfDraw(struct Bin *bin) {
+void GridDraw(struct Bin *bin) {
   AssertNotNull(bin);
 
-  struct Shelf *shelf = Unwrap(struct Shelf, bin, bin);
+  struct Grid *grid = Unwrap(struct Grid, bin, bin);
 
-  for (int row = 0; row < shelf->rowCount; row++) {
-    for (int column = 0; column < shelf->columnCount; column++) {
-      struct Bin *bin = ShelfGet(shelf, row, column);
+  for (int row = 0; row < grid->rowCount; row++) {
+    for (int column = 0; column < grid->columnCount; column++) {
+      struct Bin *bin = Grid(grid, row, column);
       if (bin->onDrawFn)
         bin->onDrawFn(bin);
 
-      struct Bounds bounds = ShelfMakeCellBounds(shelf, row, column);
+      struct Bounds bounds = GridMakeCellBounds(grid, row, column);
 
       bool dashed = false;
-      if (column == shelf->hoverColumn && row == shelf->hoverRow)
+      if (column == grid->hoverColumn && row == grid->hoverRow)
         dashed = true;
 
       DrawRectangle(bounds, BORDER_WIDTH, dashed);
@@ -371,74 +621,85 @@ void ShelfDraw(struct Bin *bin) {
   }
 }
 
-void ShelfInput(struct Bin *bin) {
+void GridInput(struct Bin *bin) {
   AssertNotNull(bin);
 
-  struct Shelf *shelf = Unwrap(struct Shelf, bin, bin);
+  struct Grid *grid = Unwrap(struct Grid, bin, bin);
 
-  shelf->hoverRow = -1;
-  shelf->hoverColumn = -1;
+  grid->hoverRow = -1;
+  grid->hoverColumn = -1;
 
-  for (int row = 0; row < shelf->rowCount; row++) {
-    for (int column = 0; column < shelf->columnCount; column++) {
-      struct Bounds bounds = ShelfMakeCellBounds(shelf, row, column);
+  for (int row = 0; row < grid->rowCount; row++) {
+    for (int column = 0; column < grid->columnCount; column++) {
+      struct Bounds bounds = GridMakeCellBounds(grid, row, column);
       if (PointInBounds(newInput.position, bounds)) {
-        shelf->hoverRow = row;
-        shelf->hoverColumn = column;
+        grid->hoverRow = row;
+        grid->hoverColumn = column;
       }
     }
   }
 
-  if (shelf->hoverRow != -1 && shelf->hoverColumn != -1) {
-    struct Bin *hoverBin = ShelfGet(shelf, shelf->hoverRow, shelf->hoverColumn);
+  if (grid->hoverRow != -1 && grid->hoverColumn != -1) {
+    struct Bin *hoverBin = Grid(grid, grid->hoverRow, grid->hoverColumn);
     if (hoverBin != NULL) {
       if (hoverBin->onInputFn)
         hoverBin->onInputFn(hoverBin);
     }
 
     if (!newInput.used) {
+      if (newInput.key == 'X') {
+        if (grid->rowCount > 1 && grid->columnCount == 1) {
+          GridDeleteRow(grid, grid->hoverRow);
+          newInput.used = true;
+        } else if (grid->rowCount == 1 && grid->columnCount > 1) {
+          GridDeleteColumn(grid, grid->hoverColumn);
+          newInput.used = true;
+        }
+        // Pass other cases up to the parent to deal with.
+      }
+
       if (newInput.key == 'H') {
-        ShelfClear(shelf, shelf->hoverRow, shelf->hoverColumn);
-        struct Shelf *newShelf = NewShelf();
-        struct Bin *newBin = Wrap(newShelf, bin);
-        ShelfPut(shelf, shelf->hoverRow, shelf->hoverColumn, newBin);
+        GridClear(grid, grid->hoverRow, grid->hoverColumn);
+        struct Grid *newGrid = NewGrid();
+        struct Bin *newBin = Wrap(newGrid, bin);
+        GridPut(grid, grid->hoverRow, grid->hoverColumn, newBin);
         newInput.used = true;
       }
 
       if (newInput.key == 'C' && !newInput.shift) {
-        ShelfInsertColumn(shelf, shelf->hoverColumn);
+        GridInsertColumn(grid, grid->hoverColumn);
         newInput.used = true;
       }
       if (newInput.key == 'C' && newInput.shift) {
-        if (shelf->columnCount > 1)
-          ShelfDeleteColumn(shelf, shelf->hoverColumn);
+        if (grid->columnCount > 1)
+          GridDeleteColumn(grid, grid->hoverColumn);
         newInput.used = true;
       }
 
       if (newInput.key == 'R' && !newInput.shift) {
-        ShelfInsertRow(shelf, shelf->hoverRow);
+        GridInsertRow(grid, grid->hoverRow);
         newInput.used = true;
       }
 
       if (newInput.key == 'R' && newInput.shift) {
-        if (shelf->rowCount > 1)
-          ShelfDeleteRow(shelf, shelf->hoverRow);
+        if (grid->rowCount > 1)
+          GridDeleteRow(grid, grid->hoverRow);
         newInput.used = true;
       }
     }
   }
 }
 
-void ShelfLayout(struct Bin *bin) {
+void GridLayout(struct Bin *bin) {
   AssertNotNull(bin);
 
-  struct Shelf *shelf = Unwrap(struct Shelf, bin, bin);
+  struct Grid *grid = Unwrap(struct Grid, bin, bin);
 
-  for (int row = 0; row < shelf->rowCount; row++) {
-    for (int column = 0; column < shelf->columnCount; column++) {
-      struct Bin *bin = ShelfGet(shelf, row, column);
+  for (int row = 0; row < grid->rowCount; row++) {
+    for (int column = 0; column < grid->columnCount; column++) {
+      struct Bin *bin = Grid(grid, row, column);
       if (bin != NULL) {
-        bin->bounds = ShelfMakeCellBounds(shelf, row, column);
+        bin->bounds = GridMakeCellBounds(grid, row, column);
         if (bin->onLayoutFn != NULL)
           bin->onLayoutFn(bin);
       }
@@ -446,34 +707,34 @@ void ShelfLayout(struct Bin *bin) {
   }
 }
 
-void ShelfDestroy(struct Bin *bin) {
+void GridDestroy(struct Bin *bin) {
   AssertNotNull(bin);
 
-  struct Shelf *shelf = Unwrap(struct Shelf, bin, bin);
+  struct Grid *grid = Unwrap(struct Grid, bin, bin);
 
-  for (int row = 0; row < shelf->rowCount; row++)
-    for (int column = 0; column < shelf->columnCount; column++)
-      ShelfClear(shelf, row, column);
+  for (int row = 0; row < grid->rowCount; row++)
+    for (int column = 0; column < grid->columnCount; column++)
+      GridClear(grid, row, column);
 
-  free(shelf->bins);
+  free(grid->bins);
 }
 
-struct Shelf *NewShelf() {
-  struct Shelf *shelf = Allocate(struct Shelf);
-  shelf->bin.onDrawFn = ShelfDraw;
-  shelf->bin.onInputFn = ShelfInput;
-  shelf->bin.onLayoutFn = ShelfLayout;
-  shelf->bin.onDestroyFn = ShelfDestroy;
+struct Grid *NewGrid() {
+  struct Grid *grid = Allocate(struct Grid);
+  grid->bin.onDrawFn = GridDraw;
+  grid->bin.onInputFn = GridInput;
+  grid->bin.onLayoutFn = GridLayout;
+  grid->bin.onDestroyFn = GridDestroy;
 
-  shelf->rowCount = 1;
-  shelf->columnCount = 1;
-  shelf->bins = AllocateArray(struct Bin *, 1);
+  grid->rowCount = 1;
+  grid->columnCount = 1;
+  grid->bins = AllocateArray(struct Bin *, 1);
 
   struct Cell *newCell = NewCell();
   struct Bin *newBin = Wrap(newCell, bin);
-  ShelfPut(shelf, 0, 0, newBin);
+  GridPut(grid, 0, 0, newBin);
 
-  return shelf;
+  return grid;
 }
 
 #define MONITOR_LIMIT 16
@@ -511,7 +772,7 @@ struct Monitor *GetMonitorAtCursor() {
     struct Monitor *monitor = &monitors[i];
     if (monitor->hMonitor == NULL) {
       monitor->hMonitor = hMonitor;
-      monitor->root = Wrap(NewShelf(), bin);
+      monitor->root = Wrap(NewShelf(ShelfDirection_Horizontal, 2), bin);
       UpdateMonitorInfo(monitor);
       return monitor;
     }
@@ -633,7 +894,7 @@ void OnOverlayKey(UINT key) {
 
 void OnOverlayPaint() {
   if (!overlay.isOpen) {
-    ReportError("Overlay received a paint event");
+    //ReportError("Overlay received a paint event");
     return;
   }
 
