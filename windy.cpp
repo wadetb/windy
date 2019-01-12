@@ -11,11 +11,8 @@
 #define HOTKEY_ID 1
 #define HOTKEY_META MOD_WIN
 #define HOTKEY_CODE VK_OEM_3
-
-#define OVERLAY_ALPHA 200
-
-#define BORDER_INSET 4
-#define BORDER_WIDTH 8
+//#define HOTKEY_META 0
+//#define HOTKEY_CODE VK_CAPITAL
 
 #define IDR_ICON 1
 
@@ -110,14 +107,90 @@ void DrawText(int x, int y, int size, const char *text) {
   draw.g->DrawString(wideText, -1, &font, pointF, &brush);
 }
 
-void DrawRectangle(struct Bounds bounds, int lineWidth, bool dashed) {
-  Gdiplus::Pen pen(Gdiplus::Color(255, 0, 0, 0), 10);
-  pen.SetAlignment(Gdiplus::PenAlignmentInset);
+#define OVERLAY_ALPHA 200
 
-  if (dashed)
-    pen.SetDashStyle(Gdiplus::DashStyleDash);
+enum Dimension {
+  Dimension_BorderInset = 0,
+};
+
+enum LineStyle {
+  LineStyle_Border,
+  LineStyle_Focus,
+  LineStyle_Action,
+  LineStyle_ActionHint,
+};
+
+void MakeLineStyle(Gdiplus::Pen *pen, LineStyle style) {
+  switch (style) {
+  case LineStyle_Border:
+    pen->SetColor(Gdiplus::Color(255, 0x1f, 0x1f, 0xff));
+    pen->SetWidth(2.5f);
+    pen->SetDashStyle(Gdiplus::DashStyleSolid);
+    break;
+  case LineStyle_Focus:
+    pen->SetColor(Gdiplus::Color(255, 128, 128, 128));
+    pen->SetWidth(3);
+    pen->SetDashStyle(Gdiplus::DashStyleDashDot);
+    break;
+  case LineStyle_Action:
+    pen->SetColor(Gdiplus::Color(255, 0xf3, 0xa1, 0x16));
+    pen->SetWidth(3.5f);
+    pen->SetDashStyle(Gdiplus::DashStyleDashDot);
+    break;
+  case LineStyle_ActionHint:
+    pen->SetColor(Gdiplus::Color(60, 0x40, 0x40, 0x40));
+    pen->SetWidth(3.5f);
+    pen->SetDashStyle(Gdiplus::DashStyleDashDot);
+    break;
+  default:
+    break;
+  }
+  pen->SetAlignment(Gdiplus::PenAlignmentInset);
+}
+
+void DrawLine(struct Point from, struct Point to, LineStyle style) {
+  Gdiplus::Pen pen(Gdiplus::Color(255, 0, 0, 0), 1);
+  MakeLineStyle(&pen, style);
+
+  draw.g->DrawLine(&pen, from.x - overlay.bounds.x, from.y - overlay.bounds.y, to.x - overlay.bounds.x,
+                   to.y - overlay.bounds.y);
+}
+
+void DrawRoundedRectangle(struct Bounds bounds, int diameter, LineStyle style) {
+  if (diameter > bounds.width)
+    diameter = bounds.width;
+  if (diameter > bounds.height)
+    diameter = bounds.height;
+
+  Gdiplus::Rect corner(bounds.x - overlay.bounds.x, bounds.y - overlay.bounds.y, diameter, diameter);
+  Gdiplus::GraphicsPath path;
+  path.AddArc(corner, 180, 90);
+  corner.X += bounds.width - diameter - 1;
+  path.AddArc(corner, 270, 90);
+  corner.Y += bounds.height - diameter - 1;
+  path.AddArc(corner, 0, 90);
+  corner.X -= bounds.width - diameter - 1;
+  path.AddArc(corner, 90, 90);
+  path.CloseFigure();
+
+  Gdiplus::Pen pen(Gdiplus::Color(255, 0, 0, 0), 1);
+  MakeLineStyle(&pen, style);
+
+  draw.g->DrawPath(&pen, &path);
+}
+
+void DrawRectangle(struct Bounds bounds, LineStyle style) {
+  Gdiplus::Pen pen(Gdiplus::Color(255, 0, 0, 0), 1);
+  MakeLineStyle(&pen, style);
 
   draw.g->DrawRectangle(&pen, bounds.x - overlay.bounds.x, bounds.y - overlay.bounds.y, bounds.width, bounds.height);
+}
+
+struct Point MakePoint(int x, int y) {
+  struct Point point;
+  point.x = x;
+  point.y = y;
+  return point;
 }
 
 bool PointInBounds(struct Point point, struct Bounds bounds) {
@@ -132,8 +205,16 @@ bool PointInBounds(struct Point point, struct Bounds bounds) {
   return true;
 }
 
+struct Point BoundsMidpoint(struct Bounds bounds) {
+  struct Point midPoint;
+  midPoint.x = bounds.x + bounds.width / 2;
+  midPoint.y = bounds.y + bounds.height / 2;
+  return midPoint;
+}
+
 struct Input {
   bool used;
+  unsigned int sequence;
   struct Point position;
   int buttons;
   int key;
@@ -152,27 +233,6 @@ struct Bin {
   struct Bounds bounds;
 };
 
-struct Cell {
-  struct Bin bin;
-  HWND hWnd;
-};
-
-void CellInput(struct Bin *bin) {
-  AssertNotNull(bin);
-
-  struct Cell *cell = Unwrap(struct Cell, bin, bin);
-
-  onDeck.placement = cell->bin.bounds;
-}
-
-struct Cell *NewCell() {
-  struct Cell *cell = Allocate(struct Cell);
-  cell->bin.onInputFn = CellInput;
-  return cell;
-}
-
-enum ShelfDirection { ShelfDirection_Horizontal, ShelfDirection_Vertical };
-
 struct Shelf {
   struct Bin bin;
 
@@ -185,8 +245,132 @@ struct Shelf {
   struct Bin **bins;
 };
 
+enum ShelfDirection { ShelfDirection_Horizontal, ShelfDirection_Vertical };
+
 struct Shelf *NewShelf(enum ShelfDirection direction, int count);
 struct Bounds ShelfMakeCellBounds(struct Shelf *shelf, int slot);
+
+enum CellAction { CellAction_None, CellAction_SplitHorizontal, CellAction_SplitVertical };
+
+struct Cell {
+  struct Bin bin;
+
+  unsigned int sequence;
+  enum CellAction previewAction;
+  struct Bin *subBin;
+  HWND hWnd;
+};
+
+void PlaceOnDeckWindow();
+
+void CellInput(struct Bin *bin) {
+  AssertNotNull(bin);
+
+  struct Cell *cell = Unwrap(struct Cell, bin, bin);
+
+  cell->sequence = newInput.sequence;
+
+  if (cell->subBin != NULL) {
+    if (cell->subBin->onInputFn)
+      cell->subBin->onInputFn(cell->subBin);
+  } else {
+    struct Point midPoint = BoundsMidpoint(cell->bin.bounds);
+    int xDelta = abs(newInput.position.x - midPoint.x);
+    int yDelta = abs(newInput.position.y - midPoint.y);
+
+    cell->previewAction = CellAction_None;
+    if (xDelta < yDelta) {
+      if (xDelta < 10)
+        cell->previewAction = CellAction_SplitHorizontal;
+    } else {
+      if (yDelta < 10)
+        cell->previewAction = CellAction_SplitVertical;
+    }
+
+    if (cell->previewAction == CellAction_SplitHorizontal) {
+      if ((newInput.buttons & MK_LBUTTON) && !(oldInput.buttons & MK_LBUTTON)) {
+        struct Shelf *newShelf = NewShelf(ShelfDirection_Horizontal, 2);
+        struct Bin *newBin = Wrap(newShelf, bin);
+        cell->subBin = newBin;
+        cell->subBin->bounds = cell->bin.bounds;
+        if (cell->subBin->onLayoutFn)
+          cell->subBin->onLayoutFn(cell->subBin);
+        cell->previewAction = CellAction_None;
+      }
+    } else if (cell->previewAction == CellAction_SplitVertical) {
+      if ((newInput.buttons & MK_LBUTTON) && !(oldInput.buttons & MK_LBUTTON)) {
+        struct Shelf *newShelf = NewShelf(ShelfDirection_Vertical, 2);
+        struct Bin *newBin = Wrap(newShelf, bin);
+        cell->subBin = newBin;
+        cell->subBin->bounds = cell->bin.bounds;
+        if (cell->subBin->onLayoutFn)
+          cell->subBin->onLayoutFn(cell->subBin);
+        cell->previewAction = CellAction_None;
+      }
+      // cell->hWnd = onDeck.hWnd;
+      // onDeck.placement = cell->bin.bounds;
+      // PlaceOnDeckWindow();
+    }
+  }
+}
+
+void CellDraw(struct Bin *bin) {
+  AssertNotNull(bin);
+
+  struct Cell *cell = Unwrap(struct Cell, bin, bin);
+
+  DrawRoundedRectangle(cell->bin.bounds, 5, LineStyle_Border);
+
+  if (cell->subBin != NULL) {
+    if (cell->subBin->onDrawFn)
+      cell->subBin->onDrawFn(cell->subBin);
+  } else {
+    if (cell->sequence == newInput.sequence) {
+      struct Point midPoint = BoundsMidpoint(cell->bin.bounds);
+
+      struct Point from, to;
+      from = MakePoint(cell->bin.bounds.x, midPoint.y);
+      to = MakePoint(cell->bin.bounds.x + cell->bin.bounds.width, midPoint.y);
+      DrawLine(from, to, cell->previewAction == CellAction_SplitVertical ? LineStyle_Action : LineStyle_ActionHint);
+
+      from = MakePoint(midPoint.x, cell->bin.bounds.y);
+      to = MakePoint(midPoint.x, cell->bin.bounds.y + cell->bin.bounds.height);
+      DrawLine(from, to, cell->previewAction == CellAction_SplitHorizontal ? LineStyle_Action : LineStyle_ActionHint);
+    }
+  }
+}
+
+void CellLayout(struct Bin *bin) {
+  AssertNotNull(bin);
+
+  struct Cell *cell = Unwrap(struct Cell, bin, bin);
+
+  if (cell->subBin != NULL) {
+    cell->subBin->bounds = cell->bin.bounds;
+    if (cell->subBin->onLayoutFn)
+      cell->subBin->onLayoutFn(cell->subBin);
+  }
+}
+
+void CellDestroy(struct Bin *bin) {
+  AssertNotNull(bin);
+
+  struct Cell *cell = Unwrap(struct Cell, bin, bin);
+
+  if (cell->subBin != NULL) {
+    if (cell->subBin->onDestroyFn)
+      cell->subBin->onDestroyFn(cell->subBin);
+  }
+}
+
+struct Cell *NewCell() {
+  struct Cell *cell = Allocate(struct Cell);
+  cell->bin.onInputFn = CellInput;
+  cell->bin.onDrawFn = CellDraw;
+  cell->bin.onLayoutFn = CellLayout;
+  cell->bin.onDestroyFn = CellDestroy;
+  return cell;
+}
 
 struct Bin *ShelfGet(struct Shelf *shelf, int slot) {
   AssertNotNull(shelf);
@@ -280,15 +464,15 @@ struct Bounds ShelfMakeCellBounds(struct Shelf *shelf, int slot) {
   struct Bounds bounds;
 
   if (shelf->direction == ShelfDirection_Vertical) {
-    bounds.width = (shelf->bin.bounds.width - (1 + 1) * BORDER_INSET) / 1;
-    bounds.height = (shelf->bin.bounds.height - (shelf->slotCount + 1) * BORDER_INSET) / shelf->slotCount;
-    bounds.x = shelf->bin.bounds.x + 0 * (bounds.width + BORDER_INSET) + BORDER_INSET;
-    bounds.y = shelf->bin.bounds.y + slot * (bounds.height + BORDER_INSET) + BORDER_INSET;
+    bounds.width = shelf->bin.bounds.width - 2 * Dimension_BorderInset;
+    bounds.height = (shelf->bin.bounds.height - (shelf->slotCount + 1) * Dimension_BorderInset) / shelf->slotCount;
+    bounds.x = shelf->bin.bounds.x + Dimension_BorderInset;
+    bounds.y = shelf->bin.bounds.y + slot * (bounds.height + Dimension_BorderInset) + Dimension_BorderInset;
   } else {
-    bounds.width = (shelf->bin.bounds.width - (shelf->slotCount + 1) * BORDER_INSET) / shelf->slotCount;
-    bounds.height = (shelf->bin.bounds.height - (1 + 1) * BORDER_INSET) / 1;
-    bounds.x = shelf->bin.bounds.x + slot * (bounds.width + BORDER_INSET) + BORDER_INSET;
-    bounds.y = shelf->bin.bounds.y + 0 * (bounds.height + BORDER_INSET) + BORDER_INSET;
+    bounds.width = (shelf->bin.bounds.width - (shelf->slotCount + 1) * Dimension_BorderInset) / shelf->slotCount;
+    bounds.height = shelf->bin.bounds.height - 2 * Dimension_BorderInset;
+    bounds.x = shelf->bin.bounds.x + slot * (bounds.width + Dimension_BorderInset) + Dimension_BorderInset;
+    bounds.y = shelf->bin.bounds.y + Dimension_BorderInset;
   }
 
   return bounds;
@@ -303,14 +487,6 @@ void ShelfDraw(struct Bin *bin) {
     struct Bin *bin = ShelfGet(shelf, slot);
     if (bin->onDrawFn)
       bin->onDrawFn(bin);
-
-    struct Bounds bounds = ShelfMakeCellBounds(shelf, slot);
-
-    bool dashed = false;
-    if (slot == shelf->hoverSlot)
-      dashed = true;
-
-    DrawRectangle(bounds, BORDER_WIDTH, dashed);
   }
 }
 
@@ -321,10 +497,10 @@ void ShelfInput(struct Bin *bin) {
 
   shelf->hoverSlot = -1;
 
-  for (int column = 0; column < shelf->slotCount; column++) {
-    struct Bounds bounds = ShelfMakeCellBounds(shelf, column);
+  for (int slot = 0; slot < shelf->slotCount; slot++) {
+    struct Bounds bounds = ShelfMakeCellBounds(shelf, slot);
     if (PointInBounds(newInput.position, bounds)) {
-      shelf->hoverSlot = column;
+      shelf->hoverSlot = slot;
     }
   }
 
@@ -378,14 +554,14 @@ void ShelfLayout(struct Bin *bin) {
 
   struct Shelf *shelf = Unwrap(struct Shelf, bin, bin);
 
-    for (int slot = 0; slot < shelf->slotCount; slot++) {
-      struct Bin *bin = ShelfGet(shelf, slot);
-      if (bin != NULL) {
-        bin->bounds = ShelfMakeCellBounds(shelf, slot);
-        if (bin->onLayoutFn != NULL)
-          bin->onLayoutFn(bin);
-      }
+  for (int slot = 0; slot < shelf->slotCount; slot++) {
+    struct Bin *bin = ShelfGet(shelf, slot);
+    if (bin != NULL) {
+      bin->bounds = ShelfMakeCellBounds(shelf, slot);
+      if (bin->onLayoutFn != NULL)
+        bin->onLayoutFn(bin);
     }
+  }
 }
 
 void ShelfDestroy(struct Bin *bin) {
@@ -393,8 +569,8 @@ void ShelfDestroy(struct Bin *bin) {
 
   struct Shelf *shelf = Unwrap(struct Shelf, bin, bin);
 
-    for (int slot = 0; slot < shelf->slotCount; slot++)
-      ShelfClear(shelf, slot);
+  for (int slot = 0; slot < shelf->slotCount; slot++)
+    ShelfClear(shelf, slot);
 
   free(shelf->bins);
 }
@@ -411,8 +587,7 @@ struct Shelf *NewShelf(enum ShelfDirection direction, int count) {
   shelf->slotCount = count;
   shelf->bins = AllocateArray(struct Bin *, shelf->slotCount);
 
-  for (int slot = 0; slot < shelf->slotCount; slot++)
-  {
+  for (int slot = 0; slot < shelf->slotCount; slot++) {
     struct Cell *newCell = NewCell();
     struct Bin *newBin = Wrap(newCell, bin);
     ShelfPut(shelf, slot, newBin);
@@ -592,10 +767,10 @@ struct Bounds GridMakeCellBounds(struct Grid *grid, int row, int column) {
   AssertGreater(grid->rowCount, 0);
 
   struct Bounds bounds;
-  bounds.width = (grid->bin.bounds.width - (grid->columnCount + 1) * BORDER_INSET) / grid->columnCount;
-  bounds.height = (grid->bin.bounds.height - (grid->rowCount + 1) * BORDER_INSET) / grid->rowCount;
-  bounds.x = grid->bin.bounds.x + column * (bounds.width + BORDER_INSET) + BORDER_INSET;
-  bounds.y = grid->bin.bounds.y + row * (bounds.height + BORDER_INSET) + BORDER_INSET;
+  bounds.width = (grid->bin.bounds.width - (grid->columnCount + 1) * Dimension_BorderInset) / grid->columnCount;
+  bounds.height = (grid->bin.bounds.height - (grid->rowCount + 1) * Dimension_BorderInset) / grid->rowCount;
+  bounds.x = grid->bin.bounds.x + column * (bounds.width + Dimension_BorderInset) + Dimension_BorderInset;
+  bounds.y = grid->bin.bounds.y + row * (bounds.height + Dimension_BorderInset) + Dimension_BorderInset;
   return bounds;
 }
 
@@ -609,14 +784,6 @@ void GridDraw(struct Bin *bin) {
       struct Bin *bin = Grid(grid, row, column);
       if (bin->onDrawFn)
         bin->onDrawFn(bin);
-
-      struct Bounds bounds = GridMakeCellBounds(grid, row, column);
-
-      bool dashed = false;
-      if (column == grid->hoverColumn && row == grid->hoverRow)
-        dashed = true;
-
-      DrawRectangle(bounds, BORDER_WIDTH, dashed);
     }
   }
 }
@@ -856,6 +1023,7 @@ void OnOverlayMouse(UINT message, UINT buttons, int x, int y) {
 
   oldInput = newInput;
   newInput.used = false;
+  newInput.sequence++;
   newInput.position.x = x + overlay.bounds.x;
   newInput.position.y = y + overlay.bounds.y;
   newInput.buttons = buttons;
@@ -864,11 +1032,6 @@ void OnOverlayMouse(UINT message, UINT buttons, int x, int y) {
   overlay.monitor->root->onInputFn(overlay.monitor->root);
 
   InvalidateRect(overlay.hWnd, NULL, TRUE);
-
-  if (message == WM_LBUTTONUP) {
-    HideOverlay();
-    PlaceOnDeckWindow();
-  }
 }
 
 void OnOverlayKey(UINT key) {
@@ -885,16 +1048,11 @@ void OnOverlayKey(UINT key) {
   overlay.monitor->root->onInputFn(overlay.monitor->root);
 
   InvalidateRect(overlay.hWnd, NULL, TRUE);
-
-  if (key == VK_ESCAPE) {
-    HideOverlay();
-    ClearOnDeckWindow();
-  }
 }
 
 void OnOverlayPaint() {
   if (!overlay.isOpen) {
-    //ReportError("Overlay received a paint event");
+    // ReportError("Overlay received a paint event");
     return;
   }
 
@@ -912,6 +1070,7 @@ void OnOverlayPaint() {
   DeleteObject(hbrBkGnd);
 
   draw.g = new Gdiplus::Graphics(hdcMem);
+  draw.g->SetSmoothingMode(Gdiplus::SmoothingMode::SmoothingModeAntiAlias);
 
   overlay.monitor->root->onDrawFn(overlay.monitor->root);
 
@@ -932,7 +1091,7 @@ LRESULT CALLBACK OverlayWindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
     switch (LOWORD(wParam)) {
     case HOTKEY_ID:
       OnOverlayHotkey();
-      break;
+      return 0;
     }
     break;
 
